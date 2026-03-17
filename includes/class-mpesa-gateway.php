@@ -3,7 +3,9 @@
  * WooCommerce M-Pesa Payment Gateway
  */
 
-if ( ! defined( 'ABSPATH' ) ) exit;
+if ( ! defined( 'ABSPATH' ) ) {
+    exit;
+}
 
 class WC_Mpesa_Gateway extends WC_Payment_Gateway {
 
@@ -44,7 +46,7 @@ class WC_Mpesa_Gateway extends WC_Payment_Gateway {
 
     public function init_form_fields() {
         $secret       = get_option( 'wcmpesa_webhook_secret', '(activate plugin to generate)' );
-        $callback_url = rest_url( 'wcmpesa/v1/callback/' . $secret );
+        $callback_url = rest_url( WCMPESA_CALLBACK_BASE . $secret );
 
         $this->form_fields = [
             'enabled' => [
@@ -165,8 +167,8 @@ class WC_Mpesa_Gateway extends WC_Payment_Gateway {
         ]);
 
         $secret       = get_option( 'wcmpesa_webhook_secret', '' );
-        $callback_url = rest_url( 'wcmpesa/v1/callback/' . $secret );
-        $result       = $api->stk_push( $phone, $order->get_total(), $order_id, $callback_url );
+        $callback_url = rest_url( WCMPESA_CALLBACK_BASE . $secret );
+        $result       = $api->stkPush( $phone, $order->get_total(), $order_id, $callback_url );
 
         if ( is_wp_error( $result ) ) {
             wc_add_notice( 'M-Pesa Error: ' . $result->get_error_message(), 'error' );
@@ -207,11 +209,15 @@ class WC_Mpesa_Gateway extends WC_Payment_Gateway {
     private $thankyou_rendered = false;
 
     public function thankyou_page( $order_id ) {
-        if ( $this->thankyou_rendered ) return;
+        if ( $this->thankyou_rendered ) {
+            return;
+        }
         $this->thankyou_rendered = true;
 
         $order = wc_get_order( $order_id );
-        if ( ! $order ) return;
+        if ( ! $order ) {
+            return;
+        }
 
         // Already paid via callback — show receipt
         if ( $order->is_paid() ) {
@@ -224,52 +230,101 @@ class WC_Mpesa_Gateway extends WC_Payment_Gateway {
         }
 
         $phone         = $order->get_meta( '_mpesa_phone' );
-        $display_phone = $phone ? '0' . substr( $phone, 3 ) : 'your phone';
+        $displayPhone  = $phone ? '0' . substr( $phone, 3 ) : 'your phone';
+        $amount        = number_format( (float) $order->get_total(), 2 );
+        $shortcode     = $this->get_option( 'shortcode' );
+        $cancelUrl     = $order->get_cancel_order_url( wc_get_page_permalink( 'myaccount' ) );
         ?>
-        <div class="wcmpesa-thankyou" id="wcmpesa-thankyou-box"
+        <div class="wcmpesa-box" id="wcmpesa-thankyou-box"
              data-order="<?php echo (int) $order_id; ?>"
              data-nonce="<?php echo esc_attr( wp_create_nonce( 'wcmpesa_action' ) ); ?>"
              data-ajaxurl="<?php echo esc_url( admin_url( 'admin-ajax.php' ) ); ?>">
 
             <div id="wcmpesa-instructions">
-                <h3>⏳ Complete Your M-Pesa Payment</h3>
-                <p>An M-Pesa prompt has been sent to <strong><?php echo esc_html( $display_phone ); ?></strong>.</p>
-                <ol>
-                    <li>Check your phone for the <strong>M-Pesa PIN prompt</strong>.</li>
-                    <li>Enter your <strong>M-Pesa PIN</strong> and press <strong>Send</strong>.</li>
-                    <li>This page will <strong>automatically confirm</strong> your payment.</li>
-                </ol>
 
-                <p id="wcmpesa-waiting-msg" style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;padding:10px 14px;color:#166534;font-size:13px;">
-                    ⏳ Waiting for payment confirmation…
-                </p>
-
-                <div class="wcmpesa-buttons">
-                    <button id="wcmpesa-complete-btn" class="button alt">🔍 Fetch Payment</button>
-                    <button id="wcmpesa-resend-btn" class="button">📱 Resend Prompt</button>
+                <!-- Header row: title + amount -->
+                <div class="wcmpesa-header">
+                    <span class="wcmpesa-title">Pay Using M-PESA</span>
+                    <span class="wcmpesa-amount">KES <?php echo esc_html( $amount ); ?></span>
                 </div>
-                <small style="color:#999;">Already paid but page didn't update? Click <strong>Fetch Payment</strong>.</small>
 
-                <p id="wcmpesa-status-msg" style="margin-top:12px;font-style:italic;"></p>
+                <!-- STK Push sent banner -->
+                <div class="wcmpesa-banner" id="wcmpesa-waiting-msg">
+                    <span class="wcmpesa-spinner"></span>
+                    Please, check your phone for STK Menu
+                </div>
+
+                <!-- STK Push instructions -->
+                <ol class="wcmpesa-steps">
+                    <li>An M-Pesa prompt was sent to <strong><?php echo esc_html( $displayPhone ); ?></strong> — enter your PIN to confirm.</li>
+                    <li>Enter your <strong>M-Pesa PIN</strong> and click <strong>OK</strong>.</li>
+                    <li>You will receive a confirmation SMS from M-Pesa.</li>
+                </ol>
+                <p class="wcmpesa-hint">After you receive a successful reply from M-Pesa, click the <strong>Complete</strong> button below.</p>
+
+                <!-- Manual Paybill fallback -->
+                <div class="wcmpesa-manual">
+                    <p class="wcmpesa-manual-title">Or follow instructions below</p>
+                    <ol class="wcmpesa-steps">
+                        <li>Go to M-Pesa menu on your phone</li>
+                        <li>Select <strong>Lipa na M-Pesa</strong> option</li>
+                        <li>Select <strong>Pay Bill</strong> option</li>
+                        <li>Enter Business Number <strong><?php echo esc_html( $shortcode ); ?></strong></li>
+                        <li>Enter Account Number <strong><?php echo esc_html( 'Order-' . $order_id ); ?></strong></li>
+                        <li>Enter the amount <strong>KES <?php echo esc_html( $amount ); ?></strong></li>
+                        <li>Enter your M-Pesa PIN and Send</li>
+                        <li>You will receive a confirmation SMS from M-Pesa</li>
+                    </ol>
+                </div>
+
+                <!-- Status message -->
+                <p id="wcmpesa-status-msg"></p>
+
+                <!-- Action buttons -->
+                <div class="wcmpesa-actions">
+                    <button id="wcmpesa-fetch-btn" class="wcmpesa-btn wcmpesa-btn--fetch">Fetch Payment</button>
+                    <a href="<?php echo esc_url( $cancelUrl ); ?>" class="wcmpesa-btn wcmpesa-btn--cancel">Cancel</a>
+                    <button id="wcmpesa-complete-btn" class="wcmpesa-btn wcmpesa-btn--complete">Complete</button>
+                </div>
+
             </div>
 
-            <div id="wcmpesa-confirmed" style="display:none;text-align:center;padding:20px 0;">
-                <span style="font-size:48px;">✅</span>
-                <h3 style="color:#00a32a;">Payment Confirmed!</h3>
-                <p>Redirecting you to your order...</p>
+            <!-- Confirmed state -->
+            <div id="wcmpesa-confirmed" style="display:none;">
+                <div class="wcmpesa-header">
+                    <span class="wcmpesa-title">Pay Using M-PESA</span>
+                    <span class="wcmpesa-amount">KES <?php echo esc_html( $amount ); ?></span>
+                </div>
+                <div class="wcmpesa-banner wcmpesa-banner--success">✅ Payment Confirmed! Redirecting…</div>
             </div>
+
         </div>
 
         <style>
-        .wcmpesa-thankyou { background:#fff; border:1px solid #e0e0e0; border-radius:8px; padding:24px; margin:20px 0; }
-        .wcmpesa-thankyou h3 { margin-top:0; }
-        .wcmpesa-thankyou ol { padding-left:20px; line-height:2.2; }
-        .wcmpesa-buttons { display:flex; gap:12px; margin-top:20px; flex-wrap:wrap; }
-        .wcmpesa-buttons .button { padding:12px 28px; font-size:15px; cursor:pointer; }
-        .wcmpesa-buttons .button.alt { background:#00a32a; color:#fff; border-color:#00a32a; }
-        .wcmpesa-paid { text-align:center; padding:30px; }
-        .wcmpesa-paid .wcmpesa-icon { font-size:48px; display:block; margin-bottom:10px; }
-        .wcmpesa-buttons .button:disabled { opacity:.6; cursor:not-allowed; }
+        .wcmpesa-box { background:#fff; border:1px solid #e0e0e0; border-radius:10px; overflow:hidden; margin:20px 0; font-size:14px; }
+        .wcmpesa-header { display:flex; justify-content:space-between; align-items:center; padding:16px 20px; border-bottom:1px solid #f0f0f0; }
+        .wcmpesa-title { font-weight:600; font-size:15px; color:#333; }
+        .wcmpesa-amount { font-weight:700; font-size:18px; color:#111; }
+        .wcmpesa-banner { display:flex; align-items:center; gap:10px; background:#00a32a; color:#fff; font-weight:600; font-size:14px; padding:14px 20px; }
+        .wcmpesa-banner--success { background:#00a32a; }
+        .wcmpesa-banner--waiting { background:#00a32a; }
+        .wcmpesa-spinner { width:16px; height:16px; border:2px solid rgba(255,255,255,.4); border-top-color:#fff; border-radius:50%; animation:wcmpesa-spin .8s linear infinite; flex-shrink:0; }
+        @keyframes wcmpesa-spin { to { transform:rotate(360deg); } }
+        .wcmpesa-steps { padding:0 20px 0 36px; margin:14px 0; color:#444; line-height:1.9; }
+        .wcmpesa-hint { padding:0 20px; color:#555; margin:0 0 12px; }
+        .wcmpesa-manual { background:#f9f9f9; border-top:1px solid #eee; padding:14px 20px; margin-top:12px; }
+        .wcmpesa-manual-title { font-weight:600; margin:0 0 8px; color:#333; }
+        .wcmpesa-manual .wcmpesa-steps { padding-left:20px; }
+        #wcmpesa-status-msg { padding:0 20px; min-height:20px; font-style:italic; }
+        .wcmpesa-actions { display:flex; gap:10px; padding:16px 20px; border-top:1px solid #f0f0f0; flex-wrap:wrap; align-items:center; }
+        .wcmpesa-btn { padding:11px 22px; border-radius:6px; font-size:14px; font-weight:600; cursor:pointer; border:none; text-decoration:none; display:inline-block; text-align:center; transition:opacity .2s; }
+        .wcmpesa-btn:disabled { opacity:.55; cursor:not-allowed; }
+        .wcmpesa-btn--fetch { background:#4a5568; color:#fff; }
+        .wcmpesa-btn--fetch:hover { background:#2d3748; color:#fff; }
+        .wcmpesa-btn--cancel { background:none; color:#555; border:1px solid #ccc; }
+        .wcmpesa-btn--cancel:hover { background:#f5f5f5; color:#333; }
+        .wcmpesa-btn--complete { background:#2563eb; color:#fff; margin-left:auto; }
+        .wcmpesa-btn--complete:hover { background:#1d4ed8; color:#fff; }
         </style>
         <?php
     }
@@ -292,7 +347,7 @@ class WC_Mpesa_Gateway extends WC_Payment_Gateway {
         $order    = wc_get_order( $order_id );
 
         if ( ! $order ) {
-            wp_send_json_error( [ 'message' => 'Order not found.' ] );
+            wp_send_json_error( [ 'message' => WCMPESA_ORDER_NOT_FOUND ] );
             return;
         }
 
@@ -340,7 +395,7 @@ class WC_Mpesa_Gateway extends WC_Payment_Gateway {
                 'environment'     => $this->get_option( 'environment' ),
             ]);
 
-            $query = $api->stk_query( $checkout_request_id );
+            $query = $api->stkQuery( $checkout_request_id );
             $logger->info( 'Fetch Payment — STK Query: ' . wp_json_encode( $query ), [ 'source' => 'wcmpesa' ] );
 
             if ( ! is_wp_error( $query ) && isset( $query['ResultCode'] ) ) {
@@ -356,7 +411,9 @@ class WC_Mpesa_Gateway extends WC_Payment_Gateway {
                             }
                         }
                     }
-                    if ( empty( $receipt ) ) $receipt = sanitize_text_field( $checkout_request_id );
+                    if ( empty( $receipt ) ) {
+                    $receipt = sanitize_text_field( $checkout_request_id );
+                }
 
                     $order->payment_complete( $receipt );
                     $order->update_meta_data( '_mpesa_receipt', $receipt );
@@ -403,7 +460,7 @@ class WC_Mpesa_Gateway extends WC_Payment_Gateway {
         $order_id = (int) ( $_POST['order_id'] ?? 0 );
         $order    = wc_get_order( $order_id );
 
-        if ( ! $order ) { wp_send_json_error( [ 'message' => 'Order not found.' ] ); return; }
+        if ( ! $order ) { wp_send_json_error( [ 'message' => WCMPESA_ORDER_NOT_FOUND ] ); return; }
         if ( $order->is_paid() ) {
             $redirect = wc_get_endpoint_url( 'view-order', $order->get_id(), wc_get_page_permalink( 'myaccount' ) );
             wp_send_json_success( [ 'status' => 'paid', 'redirect' => $redirect ] ); return;
@@ -419,8 +476,8 @@ class WC_Mpesa_Gateway extends WC_Payment_Gateway {
 
         $phone        = $order->get_meta( '_mpesa_phone' );
         $secret       = get_option( 'wcmpesa_webhook_secret', '' );
-        $callback_url = rest_url( 'wcmpesa/v1/callback/' . $secret );
-        $result       = $api->stk_push( $phone, $order->get_total(), $order_id, $callback_url );
+        $callback_url = rest_url( WCMPESA_CALLBACK_BASE . $secret );
+        $result       = $api->stkPush( $phone, $order->get_total(), $order_id, $callback_url );
 
         if ( is_wp_error( $result ) ) {
             wp_send_json_error( [ 'message' => $result->get_error_message() ] );
@@ -463,7 +520,7 @@ class WC_Mpesa_Gateway extends WC_Payment_Gateway {
         $order = new WC_Order( $order_id );
 
         if ( ! $order || ! $order->get_id() ) {
-            wp_send_json_error( [ 'message' => 'Order not found.' ] );
+            wp_send_json_error( [ 'message' => WCMPESA_ORDER_NOT_FOUND ] );
             return;
         }
 
@@ -499,7 +556,6 @@ class WC_Mpesa_Gateway extends WC_Payment_Gateway {
         }
 
         wp_send_json_success( [ 'status' => 'pending' ] );
-        return;
     }
 
     public function format_phone( $phone ) {
@@ -529,8 +585,12 @@ class WC_Mpesa_Gateway extends WC_Payment_Gateway {
      */
     public function thankyou_fallback( $order_id ) {
         $order = wc_get_order( $order_id );
-        if ( ! $order ) return;
-        if ( $order->get_payment_method() !== $this->id ) return;
+        if ( ! $order ) {
+            return;
+        }
+        if ( $order->get_payment_method() !== $this->id ) {
+            return;
+        }
         $this->thankyou_page( $order_id );
     }
 
@@ -548,9 +608,13 @@ class WC_Mpesa_Gateway extends WC_Payment_Gateway {
      * Remove PAY/CANCEL from the thank you page order details table.
      */
     public function remove_order_actions_thankyou( $actions ) {
-        if ( ! is_wc_endpoint_url( 'order-received' ) ) return $actions;
+        if ( ! is_wc_endpoint_url( 'order-received' ) ) {
+            return $actions;
+        }
         $order_id = absint( get_query_var( 'order-received' ) );
-        if ( ! $order_id ) return $actions;
+        if ( ! $order_id ) {
+            return $actions;
+        }
         $order = wc_get_order( $order_id );
         if ( $order && $order->get_payment_method() === $this->id ) {
             unset( $actions['pay'] );
@@ -563,7 +627,9 @@ class WC_Mpesa_Gateway extends WC_Payment_Gateway {
      */
     public function add_order_again_button( $order_id ) {
         $order = wc_get_order( $order_id );
-        if ( ! $order || $order->get_payment_method() !== $this->id ) return;
+        if ( ! $order || $order->get_payment_method() !== $this->id ) {
+            return;
+        }
         $shop_url = get_permalink( wc_get_page_id( 'shop' ) );
         echo '<div style="margin-top:16px;text-align:center;">';
         echo '<a href="' . esc_url( $shop_url ) . '" class="button" style="background:#1d2327;color:#fff;padding:12px 28px;border-radius:4px;text-decoration:none;font-size:15px;">&#128722; Order Another Item</a>';
@@ -573,7 +639,9 @@ class WC_Mpesa_Gateway extends WC_Payment_Gateway {
     public function enqueue_scripts() {
         // Load on checkout form and order-received page
         // Use both checks for maximum theme compatibility
-        if ( ! is_checkout() && ! is_wc_endpoint_url( 'order-received' ) ) return;
+        if ( ! is_checkout() && ! is_wc_endpoint_url( 'order-received' ) ) {
+            return;
+        }
 
         wp_enqueue_script(
             'wcmpesa-checkout',

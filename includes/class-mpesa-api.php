@@ -1,175 +1,172 @@
 <?php
 /**
  * M-Pesa Daraja API Handler
- *
- * This class talks directly to Safaricom's Daraja API.
- * It handles: getting an access token, and sending the STK Push request.
  */
 
-if ( ! defined( 'ABSPATH' ) ) exit;
+if ( ! defined( 'ABSPATH' ) ) {
+    exit;
+}
 
-class WC_Mpesa_API {
+class WcMpesaApi {
 
-    private $consumer_key;
-    private $consumer_secret;
+    private $consumerKey;
+    private $consumerSecret;
     private $shortcode;
     private $passkey;
-    private $environment; // 'sandbox' or 'production'
+    private $environment;
 
-    // Daraja API base URLs
     const SANDBOX_URL    = 'https://sandbox.safaricom.co.ke';
     const PRODUCTION_URL = 'https://api.safaricom.co.ke';
 
     public function __construct( $settings ) {
-        $this->consumer_key    = trim( $settings['consumer_key'] );
-        $this->consumer_secret = trim( $settings['consumer_secret'] );
-        $this->shortcode       = trim( $settings['shortcode'] );
-        $this->passkey         = trim( $settings['passkey'] );
-        $this->environment     = $settings['environment'];
+        $this->consumerKey    = trim( $settings['consumer_key'] );
+        $this->consumerSecret = trim( $settings['consumer_secret'] );
+        $this->shortcode      = trim( $settings['shortcode'] );
+        $this->passkey        = trim( $settings['passkey'] );
+        $this->environment    = $settings['environment'];
     }
 
-    /**
-     * Returns the correct base URL depending on environment.
-     */
-    private function base_url() {
+    private function baseUrl() {
         return $this->environment === 'production' ? self::PRODUCTION_URL : self::SANDBOX_URL;
     }
 
-    /**
-     * Step 1: Get an OAuth access token from Safaricom.
-     * This token expires after 1 hour, so we cache it in a transient.
-     *
-     * @return string|WP_Error  The access token string, or a WP_Error on failure.
-     */
-    public function get_access_token() {
-        $cached = get_transient( 'wcmpesa_access_token' );
-        if ( $cached ) return $cached;
+    private function buildPassword( $timestamp ) {
+        return base64_encode( $this->shortcode . $this->passkey . $timestamp );
+    }
 
-        // Base64-encode "ConsumerKey:ConsumerSecret"
-        $credentials = base64_encode( $this->consumer_key . ':' . $this->consumer_secret );
-
-        $response = wp_remote_get( $this->base_url() . '/oauth/v1/generate?grant_type=client_credentials', [
-            'headers' => [
-                // Do NOT send Content-Type here — Safaricom's token endpoint rejects it
-                'Authorization' => 'Basic ' . $credentials,
-            ],
+    private function makeRequest( $method, $url, $headers, $body = null ) {
+        $args = [
+            'headers'   => $headers,
             'timeout'   => 30,
             'sslverify' => false,
-        ]);
+        ];
+        if ( $body !== null ) {
+            $args['body'] = $body;
+        }
+        return $method === 'GET'
+            ? wp_remote_get( $url, $args )
+            : wp_remote_post( $url, $args );
+    }
+
+    /**
+     * Get an OAuth access token from Safaricom (cached 55 min).
+     *
+     * @return string|WP_Error
+     */
+    public function getAccessToken() {
+        $cached = get_transient( 'wcmpesa_access_token' );
+        if ( $cached ) {
+            return $cached;
+        }
+
+        $credentials = base64_encode( $this->consumerKey . ':' . $this->consumerSecret );
+        $response    = $this->makeRequest( 'GET',
+            $this->baseUrl() . '/oauth/v1/generate?grant_type=client_credentials',
+            [ 'Authorization' => 'Basic ' . $credentials ]
+        );
 
         if ( is_wp_error( $response ) ) {
-            // Return the real underlying error (e.g. "cURL error 6: could not resolve host")
-            return new WP_Error(
-                'mpesa_token_error',
-                'M-Pesa connection failed: ' . $response->get_error_message() .
-                ' — Your server may be blocking outbound connections to Safaricom. Contact your host and ask them to whitelist sandbox.safaricom.co.ke on port 443.'
+            return new WP_Error( 'mpesa_token_error',
+                'M-Pesa connection failed: ' . $response->get_error_message()
             );
         }
 
-        $http_code = wp_remote_retrieve_response_code( $response );
-        $body      = json_decode( wp_remote_retrieve_body( $response ), true );
+        $httpCode = wp_remote_retrieve_response_code( $response );
+        $body     = json_decode( wp_remote_retrieve_body( $response ), true );
 
         if ( empty( $body['access_token'] ) ) {
             $detail = $body['error_description'] ?? $body['errorMessage'] ?? wp_remote_retrieve_body( $response );
-            return new WP_Error(
-                'mpesa_token_error',
-                "M-Pesa token error (HTTP $http_code): $detail — Double-check your Consumer Key and Consumer Secret on developer.safaricom.co.ke"
+            return new WP_Error( 'mpesa_token_error',
+                "M-Pesa token error (HTTP $httpCode): $detail"
             );
         }
 
-        // Cache the token for 55 minutes (it expires in 60)
         set_transient( 'wcmpesa_access_token', $body['access_token'], 55 * MINUTE_IN_SECONDS );
-
         return $body['access_token'];
     }
 
     /**
-     * Step 2: Send an STK Push request to the customer's phone.
+     * Send an STK Push to the customer's phone.
      *
-     * @param string $phone   Customer phone in format 254XXXXXXXXX
-     * @param float  $amount  Amount to charge
-     * @param int    $order_id WooCommerce order ID (used as account reference)
-     * @param string $callback_url  URL Safaricom will POST the result to
-     *
-     * @return array|WP_Error  Decoded response body, or WP_Error on failure.
+     * @param string $phone
+     * @param float  $amount
+     * @param int    $orderId
+     * @param string $callbackUrl
+     * @return array|WP_Error
      */
-    public function stk_push( $phone, $amount, $order_id, $callback_url ) {
-        $token = $this->get_access_token();
-        if ( is_wp_error( $token ) ) return $token;
+    public function stkPush( $phone, $amount, $orderId, $callbackUrl ) {
+        $token = $this->getAccessToken();
+        if ( is_wp_error( $token ) ) {
+            return $token;
+        }
 
-        // Build the password: Base64(Shortcode + Passkey + Timestamp)
         $timestamp = date( 'YmdHis' );
-        $password  = base64_encode( $this->shortcode . $this->passkey . $timestamp );
-
-        $payload = [
+        $payload   = [
             'BusinessShortCode' => $this->shortcode,
-            'Password'          => $password,
+            'Password'          => $this->buildPassword( $timestamp ),
             'Timestamp'         => $timestamp,
-            'TransactionType'   => 'CustomerPayBillOnline', // Use 'CustomerBuyGoodsOnline' for Till numbers
-            'Amount'            => (int) ceil( $amount ),   // M-Pesa only accepts whole numbers
+            'TransactionType'   => 'CustomerPayBillOnline',
+            'Amount'            => (int) ceil( $amount ),
             'PartyA'            => $phone,
             'PartyB'            => $this->shortcode,
             'PhoneNumber'       => $phone,
-            'CallBackURL'       => $callback_url,
-            'AccountReference'  => 'Order-' . $order_id,
-            'TransactionDesc'   => 'Payment for Order ' . $order_id,
+            'CallBackURL'       => $callbackUrl,
+            'AccountReference'  => 'Order-' . $orderId,
+            'TransactionDesc'   => 'Payment for Order ' . $orderId,
         ];
 
-        $response = wp_remote_post( $this->base_url() . '/mpesa/stkpush/v1/processrequest', [
-            'headers' => [
-                'Authorization' => 'Bearer ' . $token,
-                'Content-Type'  => 'application/json',
-            ],
-            'body'      => json_encode( $payload ),
-            'timeout'   => 30,
-            'sslverify' => false, // Needed on many shared cPanel hosts
-        ]);
+        $response = $this->makeRequest( 'POST',
+            $this->baseUrl() . '/mpesa/stkpush/v1/processrequest',
+            [ 'Authorization' => 'Bearer ' . $token, 'Content-Type' => 'application/json' ],
+            json_encode( $payload )
+        );
 
-        if ( is_wp_error( $response ) ) return $response;
+        if ( is_wp_error( $response ) ) {
+            return $response;
+        }
 
         $body = json_decode( wp_remote_retrieve_body( $response ), true );
-
-        // ResponseCode '0' means the STK Push was sent successfully
         if ( isset( $body['ResponseCode'] ) && $body['ResponseCode'] === '0' ) {
             return $body;
         }
 
-        $error_msg = $body['errorMessage'] ?? $body['ResponseDescription'] ?? 'Unknown M-Pesa error.';
-        return new WP_Error( 'mpesa_stk_error', $error_msg, $body );
+        $errorMsg = $body['errorMessage'] ?? $body['ResponseDescription'] ?? 'Unknown M-Pesa error.';
+        return new WP_Error( 'mpesa_stk_error', $errorMsg, $body );
     }
+
     /**
-     * Step 3: Query the status of an STK Push transaction directly from Safaricom.
-     * Used as a fallback when the callback hasn't fired.
+     * Query the status of an STK Push transaction.
      *
-     * @param string $checkout_request_id  The CheckoutRequestID from the original STK Push
+     * @param string $checkoutRequestId
      * @return array|WP_Error
      */
-    public function stk_query( $checkout_request_id ) {
-        $token = $this->get_access_token();
-        if ( is_wp_error( $token ) ) return $token;
+    public function stkQuery( $checkoutRequestId ) {
+        $token = $this->getAccessToken();
+        if ( is_wp_error( $token ) ) {
+            return $token;
+        }
 
         $timestamp = date( 'YmdHis' );
-        $password  = base64_encode( $this->shortcode . $this->passkey . $timestamp );
-
-        $payload = [
+        $payload   = [
             'BusinessShortCode' => $this->shortcode,
-            'Password'          => $password,
+            'Password'          => $this->buildPassword( $timestamp ),
             'Timestamp'         => $timestamp,
-            'CheckoutRequestID' => $checkout_request_id,
+            'CheckoutRequestID' => $checkoutRequestId,
         ];
 
-        $response = wp_remote_post( $this->base_url() . '/mpesa/stkpushquery/v1/query', [
-            'headers' => [
-                'Authorization' => 'Bearer ' . $token,
-                'Content-Type'  => 'application/json',
-            ],
-            'body'      => json_encode( $payload ),
-            'timeout'   => 30,
-            'sslverify' => false,
-        ]);
+        $response = $this->makeRequest( 'POST',
+            $this->baseUrl() . '/mpesa/stkpushquery/v1/query',
+            [ 'Authorization' => 'Bearer ' . $token, 'Content-Type' => 'application/json' ],
+            json_encode( $payload )
+        );
 
-        if ( is_wp_error( $response ) ) return $response;
+        if ( is_wp_error( $response ) ) {
+            return $response;
+        }
 
         return json_decode( wp_remote_retrieve_body( $response ), true );
     }
 }
+
+// Backward-compatible alias — existing code that references WC_Mpesa_API still works
+class_alias( 'WcMpesaApi', 'WC_Mpesa_API' );
