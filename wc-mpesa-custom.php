@@ -1,57 +1,95 @@
-/* WooCommerce M-Pesa Admin Styles */
+<?php
+/**
+ * Plugin Name: WooCommerce M-Pesa Custom
+ * Plugin URI:  https://aksantechnologies.co.ke
+ * Description: Accept M-Pesa STK Push payments in WooCommerce via Safaricom Daraja API.
+ * Version:     2.2.4
+ * Author:      Aksan
+ * License:     GPL-2.0+
+ * Text Domain: wc-mpesa-custom
+ */
 
-.wcmpesa-stats {
-    display: flex;
-    gap: 16px;
-    margin: 16px 0 24px;
-    flex-wrap: wrap;
+if ( ! defined( 'ABSPATH' ) ) exit;
+
+define( 'WCMPESA_VERSION',    '2.2.4' );
+define( 'WCMPESA_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
+define( 'WCMPESA_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
+define( 'WCMPESA_LOG_TABLE',  'wcmpesa_transactions' );
+
+// ─── Activation: create DB table + generate webhook secret ────────────────────
+register_activation_hook( __FILE__, 'wcmpesa_activate' );
+function wcmpesa_activate() {
+    global $wpdb;
+    $table   = $wpdb->prefix . WCMPESA_LOG_TABLE;
+    $charset = $wpdb->get_charset_collate();
+
+    // [SECURITY] Added indexes on order_id and checkout_request_id for performance
+    $sql = "CREATE TABLE IF NOT EXISTS $table (
+        id                   BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+        order_id             BIGINT(20) UNSIGNED NOT NULL,
+        phone                VARCHAR(20)         NOT NULL,
+        amount               DECIMAL(10,2)       NOT NULL,
+        mpesa_receipt        VARCHAR(50)         DEFAULT '',
+        checkout_request_id  VARCHAR(100)        DEFAULT '',
+        status               VARCHAR(20)         NOT NULL DEFAULT 'pending',
+        raw_response         LONGTEXT,
+        created_at           DATETIME            NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY  (id),
+        KEY idx_order_id (order_id),
+        KEY idx_checkout_request_id (checkout_request_id)
+    ) $charset;";
+
+    require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+    dbDelta( $sql );
+
+    // [SECURITY] Auto-generate a webhook secret on first activation if not already set
+    if ( ! get_option( 'wcmpesa_webhook_secret' ) ) {
+        update_option( 'wcmpesa_webhook_secret', wp_generate_password( 32, false ) );
+    }
 }
 
-.stat-box {
-    background: #fff;
-    border: 1px solid #e0e0e0;
-    border-radius: 8px;
-    padding: 16px 24px;
-    min-width: 120px;
-    text-align: center;
-    box-shadow: 0 1px 3px rgba(0,0,0,.06);
+// ─── Load the gateway once WooCommerce is ready ────────────────────────────────
+add_action( 'plugins_loaded', 'wcmpesa_init_gateway' );
+function wcmpesa_init_gateway() {
+    if ( ! class_exists( 'WC_Payment_Gateway' ) ) {
+        add_action( 'admin_notices', function() {
+            echo '<div class="notice notice-error"><p><strong>WooCommerce M-Pesa Custom</strong> requires WooCommerce to be installed and active.</p></div>';
+        });
+        return;
+    }
+
+    require_once WCMPESA_PLUGIN_DIR . 'includes/class-mpesa-api.php';
+    require_once WCMPESA_PLUGIN_DIR . 'includes/class-mpesa-gateway.php';
+    require_once WCMPESA_PLUGIN_DIR . 'includes/class-mpesa-callback.php';
+    require_once WCMPESA_PLUGIN_DIR . 'admin/class-mpesa-admin.php';
+
+    add_filter( 'woocommerce_payment_gateways', function( $gateways ) {
+        $gateways[] = 'WC_Mpesa_Gateway';
+        return $gateways;
+    });
 }
 
-.stat-box .stat-number {
-    display: block;
-    font-size: 28px;
-    font-weight: 700;
-    color: #1d2327;
-    line-height: 1.2;
-}
-
-.stat-box .stat-label {
-    display: block;
-    font-size: 12px;
-    color: #757575;
-    margin-top: 4px;
-    text-transform: uppercase;
-    letter-spacing: .5px;
-}
-
-.stat-box.success { border-top: 4px solid #00a32a; }
-.stat-box.pending { border-top: 4px solid #dba617; }
-.stat-box.failed  { border-top: 4px solid #d63638; }
-.stat-box.revenue { border-top: 4px solid #2271b1; }
-
-/* Status badges */
-.wcmpesa-badge {
-    display: inline-block;
-    padding: 3px 10px;
-    border-radius: 20px;
-    font-size: 12px;
-    font-weight: 600;
-    text-transform: capitalize;
-}
-
-.wcmpesa-badge--completed { background: #d1fae5; color: #065f46; }
-.wcmpesa-badge--pending   { background: #fef3c7; color: #92400e; }
-.wcmpesa-badge--failed    { background: #fee2e2; color: #991b1b; }
-
-.wcmpesa-table { margin-top: 0; }
-.wcmpesa-table th { font-weight: 600; }
+// ─── Register REST callback endpoint with secret token in URL ─────────────────
+// [SECURITY FIX] Route now includes a secret token segment.
+// Safaricom will POST to: /wp-json/wcmpesa/v1/callback/<secret>
+// Anyone without the secret gets a 403 before the handler even runs.
+add_action( 'rest_api_init', function() {
+    register_rest_route( 'wcmpesa/v1', '/callback/(?P<token>[A-Za-z0-9_-]{20,})', [
+        'methods'  => 'POST',
+        'callback' => [ 'WC_Mpesa_Callback', 'handle' ],
+        // [SECURITY] Validate the token using constant-time comparison to prevent timing attacks
+        'permission_callback' => function( WP_REST_Request $request ) {
+            $expected = get_option( 'wcmpesa_webhook_secret', '' );
+            $provided = $request->get_param( 'token' );
+            if ( empty( $expected ) || empty( $provided ) ) return false;
+            return hash_equals( $expected, (string) $provided );
+        },
+        'args' => [
+            'token' => [
+                'required'          => true,
+                'validate_callback' => function( $v ) { return is_string($v) && strlen($v) >= 20; },
+                'sanitize_callback' => 'sanitize_text_field',
+            ],
+        ],
+    ]);
+});
