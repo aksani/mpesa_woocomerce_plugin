@@ -210,13 +210,11 @@ class WC_Mpesa_Gateway extends WC_Payment_Gateway {
 
     public function thankyou_page( $order_id ) {
         if ( $this->thankyou_rendered ) {
-            return;
         }
         $this->thankyou_rendered = true;
 
         $order = wc_get_order( $order_id );
         if ( ! $order ) {
-            return;
         }
 
         // Already paid via callback — show receipt
@@ -226,7 +224,6 @@ class WC_Mpesa_Gateway extends WC_Payment_Gateway {
                 <h3>Payment Confirmed!</h3>
                 <p>Your M-Pesa payment has been received. Receipt: <strong>' . esc_html( $order->get_meta( '_mpesa_receipt' ) ) . '</strong></p>
             </div>';
-            return;
         }
 
         $phone         = $order->get_meta( '_mpesa_phone' );
@@ -448,7 +445,6 @@ class WC_Mpesa_Gateway extends WC_Payment_Gateway {
         }
 
         wp_send_json_error( [ 'message' => 'Payment not confirmed yet. Please wait a moment or click Resend Prompt.' ] );
-        return;
     }
 
     /**
@@ -488,7 +484,6 @@ class WC_Mpesa_Gateway extends WC_Payment_Gateway {
         $order->save();
 
         wp_send_json_success( [ 'status' => 'sent', 'message' => 'New prompt sent! Check your phone.' ] );
-        return;
     }
 
     /**
@@ -586,10 +581,8 @@ class WC_Mpesa_Gateway extends WC_Payment_Gateway {
     public function thankyou_fallback( $order_id ) {
         $order = wc_get_order( $order_id );
         if ( ! $order ) {
-            return;
         }
         if ( $order->get_payment_method() !== $this->id ) {
-            return;
         }
         $this->thankyou_page( $order_id );
     }
@@ -628,7 +621,6 @@ class WC_Mpesa_Gateway extends WC_Payment_Gateway {
     public function add_order_again_button( $order_id ) {
         $order = wc_get_order( $order_id );
         if ( ! $order || $order->get_payment_method() !== $this->id ) {
-            return;
         }
         $shop_url = get_permalink( wc_get_page_id( 'shop' ) );
         echo '<div style="margin-top:16px;text-align:center;">';
@@ -640,7 +632,6 @@ class WC_Mpesa_Gateway extends WC_Payment_Gateway {
         // Load on checkout form and order-received page
         // Use both checks for maximum theme compatibility
         if ( ! is_checkout() && ! is_wc_endpoint_url( 'order-received' ) ) {
-            return;
         }
 
         wp_enqueue_script(

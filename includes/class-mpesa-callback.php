@@ -7,7 +7,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-class WC_Mpesa_Callback {
+class WcMpesaCallback {
 
     public static function handle( WP_REST_Request $request ) {
         $raw  = $request->get_body();
@@ -19,21 +19,26 @@ class WC_Mpesa_Callback {
             return new WP_REST_Response( [ 'ResultCode' => 1, 'ResultDesc' => 'Invalid payload' ], 400 );
         }
 
+        return self::processCallback( $body );
+    }
+
+    private static function processCallback( $body ) {
         $stkCallback       = $body['Body']['stkCallback'];
         $resultCode        = (int) $stkCallback['ResultCode'];
         $checkoutRequestId = sanitize_text_field( $stkCallback['CheckoutRequestID'] );
+        $accepted          = new WP_REST_Response( [ 'ResultCode' => 0, 'ResultDesc' => 'Accepted' ], 200 );
 
         self::writeLog( 'Looking up order for CheckoutRequestID: ' . $checkoutRequestId );
         $order = self::findOrderByCheckoutRequestId( $checkoutRequestId );
 
         if ( ! $order ) {
             self::writeLog( 'FAILED: No order found for CheckoutRequestID: ' . $checkoutRequestId );
-            return new WP_REST_Response( [ 'ResultCode' => 0, 'ResultDesc' => 'Accepted' ], 200 );
+            return $accepted;
         }
 
         if ( $order->is_paid() ) {
             self::writeLog( 'Skipped: Order #' . $order->get_id() . ' is already paid.' );
-            return new WP_REST_Response( [ 'ResultCode' => 0, 'ResultDesc' => 'Accepted' ], 200 );
+            return $accepted;
         }
 
         if ( $resultCode === 0 ) {
@@ -42,7 +47,7 @@ class WC_Mpesa_Callback {
             self::processFailedPayment( $order, $stkCallback, $checkoutRequestId, $body );
         }
 
-        return new WP_REST_Response( [ 'ResultCode' => 0, 'ResultDesc' => 'Accepted' ], 200 );
+        return $accepted;
     }
 
     private static function isValidPayload( $body ) {
@@ -179,3 +184,6 @@ class WC_Mpesa_Callback {
         wc_get_logger()->info( $message, [ 'source' => 'wcmpesa' ] );
     }
 }
+
+// Backward-compatible alias
+class_alias( 'WcMpesaCallback', 'WC_Mpesa_Callback' );
