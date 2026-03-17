@@ -127,25 +127,34 @@ class WC_Mpesa_Gateway extends WC_Payment_Gateway {
     }
 
     public function validate_fields() {
-        // Require login — M-Pesa payments are for registered customers only
-        if ( ! is_user_logged_in() ) {
-            wc_add_notice( 'You must be logged in to pay with M-Pesa. Please <a href="' . esc_url( wc_get_page_permalink( 'myaccount' ) ) . '">log in or create an account</a> first.', 'error' );
-            return false;
-        }
-        if ( ! isset( $_POST['wcmpesa_nonce'] ) || ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['wcmpesa_nonce'] ) ), 'wcmpesa_checkout' ) ) {
-            wc_add_notice( 'Security check failed. Please refresh and try again.', 'error' );
-            return false;
-        }
-        $phone = isset( $_POST['mpesa_phone'] ) ? sanitize_text_field( $_POST['mpesa_phone'] ) : '';
-        if ( empty( $phone ) ) {
-            wc_add_notice( 'Please enter your M-Pesa phone number.', 'error' );
-            return false;
-        }
-        if ( ! $this->format_phone( $phone ) ) {
-            wc_add_notice( 'Please enter a valid Kenyan phone number (e.g. 0712345678).', 'error' );
+        $error = $this->getValidationError();
+        if ( $error ) {
+            wc_add_notice( $error, 'error' );
             return false;
         }
         return true;
+    }
+
+    private function getValidationError() {
+        if ( ! is_user_logged_in() ) {
+            return 'You must be logged in to pay with M-Pesa. Please <a href="' . esc_url( wc_get_page_permalink( 'myaccount' ) ) . '">log in or create an account</a> first.';
+        }
+        $nonce = isset( $_POST['wcmpesa_nonce'] ) ? sanitize_text_field( wp_unslash( $_POST['wcmpesa_nonce'] ) ) : '';
+        if ( ! wp_verify_nonce( $nonce, 'wcmpesa_checkout' ) ) {
+            return 'Security check failed. Please refresh and try again.';
+        }
+        return $this->getPhoneError();
+    }
+
+    private function getPhoneError() {
+        $phone = isset( $_POST['mpesa_phone'] ) ? sanitize_text_field( $_POST['mpesa_phone'] ) : '';
+        if ( empty( $phone ) ) {
+            return 'Please enter your M-Pesa phone number.';
+        }
+        if ( ! $this->format_phone( $phone ) ) {
+            return 'Please enter a valid Kenyan phone number (e.g. 0712345678).';
+        }
+        return '';
     }
 
     public function process_payment( $order_id ) {
@@ -210,11 +219,13 @@ class WC_Mpesa_Gateway extends WC_Payment_Gateway {
 
     public function thankyou_page( $order_id ) {
         if ( $this->thankyou_rendered ) {
+            return;
         }
         $this->thankyou_rendered = true;
 
         $order = wc_get_order( $order_id );
         if ( ! $order ) {
+            return;
         }
 
         // Already paid via callback — show receipt
@@ -328,123 +339,110 @@ class WC_Mpesa_Gateway extends WC_Payment_Gateway {
 
 
     /**
-     * AJAX: "Fetch Payment" button handler.
-     *
-     * Strategy:
-     * 1. Check if order is already paid in WooCommerce (callback may have fired)
-     * 2. If not, check our transaction log for a completed record (DB may have
-     *    the receipt even if WC order status hasn't updated yet)
-     * 3. If log shows completed, call payment_complete() to sync the order
-     * 4. If still nothing, query Safaricom STK Query API directly
+     * AJAX: Fetch / Complete button handler.
+     * Checks payment via WC DB → transaction log → Safaricom STK Query.
      */
     public function ajax_complete_order() {
         check_ajax_referer( 'wcmpesa_action', 'nonce' );
-
         $order_id = (int) ( $_POST['order_id'] ?? 0 );
         $order    = wc_get_order( $order_id );
-
         if ( ! $order ) {
             wp_send_json_error( [ 'message' => WCMPESA_ORDER_NOT_FOUND ] );
             return;
         }
+        $this->resolvePayment( $order );
+    }
 
-        $logger = wc_get_logger();
-
-        // ── Step 1: Already paid in WooCommerce ──────────────────────────────
+    private function resolvePayment( $order ) {
         if ( $order->is_paid() ) {
-            $receipt  = $order->get_meta( '_mpesa_receipt' );
-            $redirect = wc_get_endpoint_url( 'view-order', $order->get_id(), wc_get_page_permalink( 'myaccount' ) );
-            wp_send_json_success( [ 'status' => 'paid', 'receipt' => $receipt, 'redirect' => $redirect ] );
+            $this->sendPaidResponse( $order, $order->get_meta( '_mpesa_receipt' ) );
             return;
         }
-
-        // ── Step 2: Check transaction log for completed record ───────────────
-        global $wpdb;
-        $checkout_request_id = $order->get_meta( '_mpesa_checkout_request_id' );
-        if ( $checkout_request_id ) {
-            $log = $wpdb->get_row( $wpdb->prepare(
-                "SELECT * FROM {$wpdb->prefix}" . WCMPESA_LOG_TABLE . " WHERE checkout_request_id = %s LIMIT 1",
-                $checkout_request_id
-            ) );
-
-            $logger->info( 'Fetch Payment — log record: ' . wp_json_encode( $log ), [ 'source' => 'wcmpesa' ] );
-
-            if ( $log && $log->status === 'completed' && ! empty( $log->mpesa_receipt ) ) {
-                // Callback fired and receipt is in our log — sync to WooCommerce
-                $receipt = sanitize_text_field( $log->mpesa_receipt );
-                $order->payment_complete( $receipt );
-                $order->update_meta_data( '_mpesa_receipt', $receipt );
-                $order->add_order_note( 'M-Pesa payment synced from transaction log ✅ Receipt: ' . $receipt );
-                $order->save();
-                $redirect = wc_get_endpoint_url( 'view-order', $order->get_id(), wc_get_page_permalink( 'myaccount' ) );
-                wp_send_json_success( [ 'status' => 'paid', 'receipt' => $receipt, 'redirect' => $redirect ] );
-                return;
-            }
+        $checkoutRequestId = $order->get_meta( '_mpesa_checkout_request_id' );
+        if ( $checkoutRequestId && $this->syncFromLog( $order, $checkoutRequestId ) ) {
+            return;
         }
-
-        // ── Step 3: Query Safaricom STK Query API directly ───────────────────
-        if ( $checkout_request_id ) {
-            $api = new WC_Mpesa_API([
-                'consumer_key'    => $this->get_option( 'consumer_key' ),
-                'consumer_secret' => $this->get_option( 'consumer_secret' ),
-                'shortcode'       => $this->get_option( 'shortcode' ),
-                'passkey'         => $this->get_option( 'passkey' ),
-                'environment'     => $this->get_option( 'environment' ),
-            ]);
-
-            $query = $api->stkQuery( $checkout_request_id );
-            $logger->info( 'Fetch Payment — STK Query: ' . wp_json_encode( $query ), [ 'source' => 'wcmpesa' ] );
-
-            if ( ! is_wp_error( $query ) && isset( $query['ResultCode'] ) ) {
-                $result_code = (int) $query['ResultCode'];
-
-                if ( $result_code === 0 ) {
-                    // Extract receipt
-                    $receipt = '';
-                    if ( isset( $query['CallbackMetadata']['Item'] ) ) {
-                        foreach ( $query['CallbackMetadata']['Item'] as $item ) {
-                            if ( ( $item['Name'] ?? '' ) === 'MpesaReceiptNumber' ) {
-                                $receipt = sanitize_text_field( (string) ( $item['Value'] ?? '' ) );
-                            }
-                        }
-                    }
-                    if ( empty( $receipt ) ) {
-                    $receipt = sanitize_text_field( $checkout_request_id );
-                }
-
-                    $order->payment_complete( $receipt );
-                    $order->update_meta_data( '_mpesa_receipt', $receipt );
-                    $order->add_order_note( 'M-Pesa confirmed via STK Query ✅ Receipt: ' . $receipt );
-                    $order->save();
-
-                    $wpdb->update(
-                        $wpdb->prefix . WCMPESA_LOG_TABLE,
-                        [ 'status' => 'completed', 'mpesa_receipt' => $receipt ],
-                        [ 'checkout_request_id' => $checkout_request_id ],
-                        [ '%s', '%s' ], [ '%s' ]
-                    );
-
-                    $redirect = wc_get_endpoint_url( 'view-order', $order->get_id(), wc_get_page_permalink( 'myaccount' ) );
-                    wp_send_json_success( [ 'status' => 'paid', 'receipt' => $receipt, 'redirect' => $redirect ] );
-                    return;
-                }
-
-                if ( $result_code === 1032 ) {
-                    wp_send_json_error( [ 'message' => 'You cancelled the M-Pesa prompt. Click Resend Prompt to try again.' ] );
-                    return;
-                }
-                if ( $result_code === 1037 ) {
-                    wp_send_json_error( [ 'message' => 'M-Pesa prompt timed out. Click Resend Prompt to get a new one.' ] );
-                    return;
-                }
-
-                $desc = sanitize_text_field( $query['ResultDesc'] ?? 'Payment not completed.' );
-                wp_send_json_error( [ 'message' => $desc ] );
-                return;
-            }
+        if ( $checkoutRequestId ) {
+            $this->queryAndResolve( $order, $checkoutRequestId );
+            return;
         }
-
         wp_send_json_error( [ 'message' => 'Payment not confirmed yet. Please wait a moment or click Resend Prompt.' ] );
+    }
+
+    private function syncFromLog( $order, $checkoutRequestId ) {
+        global $wpdb;
+        $log = $wpdb->get_row( $wpdb->prepare(
+            "SELECT * FROM {$wpdb->prefix}" . WCMPESA_LOG_TABLE . " WHERE checkout_request_id = %s LIMIT 1",
+            $checkoutRequestId
+        ) );
+        wc_get_logger()->info( 'Fetch Payment — log: ' . wp_json_encode( $log ), [ 'source' => 'wcmpesa' ] );
+        if ( ! $log || $log->status !== 'completed' || empty( $log->mpesa_receipt ) ) {
+            return false;
+        }
+        $receipt = sanitize_text_field( $log->mpesa_receipt );
+        $order->payment_complete( $receipt );
+        $order->update_meta_data( '_mpesa_receipt', $receipt );
+        $order->add_order_note( 'M-Pesa payment synced from transaction log ✅ Receipt: ' . $receipt );
+        $order->save();
+        $this->sendPaidResponse( $order, $receipt );
+        return true;
+    }
+
+    private function queryAndResolve( $order, $checkoutRequestId ) {
+        $api   = new WC_Mpesa_API( $this->getApiSettings() );
+        $query = $api->stkQuery( $checkoutRequestId );
+        wc_get_logger()->info( 'Fetch Payment — STK Query: ' . wp_json_encode( $query ), [ 'source' => 'wcmpesa' ] );
+        if ( is_wp_error( $query ) || ! isset( $query['ResultCode'] ) ) {
+            wp_send_json_error( [ 'message' => 'Payment not confirmed yet. Please wait a moment or click Resend Prompt.' ] );
+            return;
+        }
+        $this->handleQueryResult( $order, $query, $checkoutRequestId );
+    }
+
+    private function handleQueryResult( $order, $query, $checkoutRequestId ) {
+        $resultCode = (int) $query['ResultCode'];
+        if ( $resultCode !== 0 ) {
+            $messages = [ 1032 => 'You cancelled the M-Pesa prompt.', 1037 => 'M-Pesa prompt timed out.' ];
+            $msg = $messages[ $resultCode ] ?? sanitize_text_field( $query['ResultDesc'] ?? 'Payment not completed.' );
+            wp_send_json_error( [ 'message' => $msg ] );
+            return;
+        }
+        $receipt = $this->extractReceiptFromQuery( $query, $checkoutRequestId );
+        $order->payment_complete( $receipt );
+        $order->update_meta_data( '_mpesa_receipt', $receipt );
+        $order->add_order_note( 'M-Pesa confirmed via STK Query ✅ Receipt: ' . $receipt );
+        $order->save();
+        global $wpdb;
+        $wpdb->update( $wpdb->prefix . WCMPESA_LOG_TABLE,
+            [ 'status' => 'completed', 'mpesa_receipt' => $receipt ],
+            [ 'checkout_request_id' => $checkoutRequestId ],
+            [ '%s', '%s' ], [ '%s' ]
+        );
+        $this->sendPaidResponse( $order, $receipt );
+    }
+
+    private function extractReceiptFromQuery( $query, $fallback ) {
+        foreach ( $query['CallbackMetadata']['Item'] ?? [] as $item ) {
+            if ( ( $item['Name'] ?? '' ) === 'MpesaReceiptNumber' && ! empty( $item['Value'] ) ) {
+                return sanitize_text_field( (string) $item['Value'] );
+            }
+        }
+        return sanitize_text_field( $fallback );
+    }
+
+    private function sendPaidResponse( $order, $receipt ) {
+        $redirect = wc_get_endpoint_url( 'view-order', $order->get_id(), wc_get_page_permalink( 'myaccount' ) );
+        wp_send_json_success( [ 'status' => 'paid', 'receipt' => $receipt, 'redirect' => $redirect ] );
+    }
+
+    private function getApiSettings() {
+        return [
+            'consumer_key'    => $this->get_option( 'consumer_key' ),
+            'consumer_secret' => $this->get_option( 'consumer_secret' ),
+            'shortcode'       => $this->get_option( 'shortcode' ),
+            'passkey'         => $this->get_option( 'passkey' ),
+            'environment'     => $this->get_option( 'environment' ),
+        ];
     }
 
     /**
@@ -462,13 +460,7 @@ class WC_Mpesa_Gateway extends WC_Payment_Gateway {
             wp_send_json_success( [ 'status' => 'paid', 'redirect' => $redirect ] ); return;
         }
 
-        $api = new WC_Mpesa_API([
-            'consumer_key'    => $this->get_option( 'consumer_key' ),
-            'consumer_secret' => $this->get_option( 'consumer_secret' ),
-            'shortcode'       => $this->get_option( 'shortcode' ),
-            'passkey'         => $this->get_option( 'passkey' ),
-            'environment'     => $this->get_option( 'environment' ),
-        ]);
+        $api = new WC_Mpesa_API( $this->getApiSettings() );
 
         $phone        = $order->get_meta( '_mpesa_phone' );
         $secret       = get_option( 'wcmpesa_webhook_secret', '' );
@@ -487,70 +479,63 @@ class WC_Mpesa_Gateway extends WC_Payment_Gateway {
     }
 
     /**
-     * AJAX: check if the order has been paid (called every few seconds by JS polling).
+     * AJAX: Poll order status every 5s from the thank you page.
      */
     public function ajax_check_status() {
-        // Use wp_verify_nonce directly so we can refresh expired nonces on cached pages
         $nonce = isset( $_POST['nonce'] ) ? sanitize_text_field( wp_unslash( $_POST['nonce'] ) ) : '';
         if ( ! wp_verify_nonce( $nonce, 'wcmpesa_action' ) ) {
             wp_send_json_error( [ 'code' => 'nonce_expired', 'nonce' => wp_create_nonce( 'wcmpesa_action' ) ] );
             return;
         }
+        $this->checkOrderStatus();
+    }
 
+    private function checkOrderStatus() {
         $order_id = (int) ( $_POST['order_id'] ?? 0 );
-        if ( ! $order_id ) {
-            wp_send_json_error( [ 'message' => 'Invalid order.' ] );
+        $order    = $order_id ? $this->getFreshOrder( $order_id ) : null;
+        if ( ! $order ) {
+            wp_send_json_error( [ 'message' => $order_id ? WCMPESA_ORDER_NOT_FOUND : 'Invalid order.' ] );
             return;
         }
+        $this->maybeSyncFromLog( $order );
+        if ( $order->is_paid() ) {
+            $this->sendPaidResponse( $order, $order->get_meta( '_mpesa_receipt' ) );
+            return;
+        }
+        wp_send_json_success( [ 'status' => 'pending' ] );
+    }
 
-        // CRITICAL: clear WooCommerce object cache so we always read fresh status from DB
-        // Without this, is_paid() can return stale 'pending' even after callback fires
+    private function getFreshOrder( $order_id ) {
+        // Clear object cache so is_paid() always reflects current DB state
         wc_delete_order_item_transients( $order_id );
         if ( function_exists( 'wc_get_orders' ) ) {
             WC_Cache_Helper::invalidate_cache_group( 'orders' );
         }
         clean_post_cache( $order_id );
-
-        // Read fresh from DB — do NOT use wc_get_order() which may return cached object
         $order = new WC_Order( $order_id );
+        return ( $order && $order->get_id() ) ? $order : null;
+    }
 
-        if ( ! $order || ! $order->get_id() ) {
-            wp_send_json_error( [ 'message' => WCMPESA_ORDER_NOT_FOUND ] );
+    private function maybeSyncFromLog( $order ) {
+        if ( $order->is_paid() ) {
             return;
         }
-
-        // Also check our transaction log directly as a second source of truth
+        $checkoutRequestId = $order->get_meta( '_mpesa_checkout_request_id' );
+        if ( ! $checkoutRequestId ) {
+            return;
+        }
         global $wpdb;
-        $checkout_request_id = $order->get_meta( '_mpesa_checkout_request_id' );
-        if ( $checkout_request_id && ! $order->is_paid() ) {
-            $log_status = $wpdb->get_var( $wpdb->prepare(
-                "SELECT status FROM {$wpdb->prefix}" . WCMPESA_LOG_TABLE . " WHERE checkout_request_id = %s LIMIT 1",
-                $checkout_request_id
-            ) );
-            // Log shows completed but WC order not yet updated — force sync
-            if ( $log_status === 'completed' ) {
-                $receipt = $wpdb->get_var( $wpdb->prepare(
-                    "SELECT mpesa_receipt FROM {$wpdb->prefix}" . WCMPESA_LOG_TABLE . " WHERE checkout_request_id = %s LIMIT 1",
-                    $checkout_request_id
-                ) );
-                $receipt = sanitize_text_field( (string) $receipt );
-                $order->payment_complete( $receipt );
-                $order->update_meta_data( '_mpesa_receipt', $receipt );
-                $order->add_order_note( 'M-Pesa payment auto-synced from transaction log ✅ Receipt: ' . $receipt );
-                $order->save();
-            }
+        $row = $wpdb->get_row( $wpdb->prepare(
+            "SELECT status, mpesa_receipt FROM {$wpdb->prefix}" . WCMPESA_LOG_TABLE . " WHERE checkout_request_id = %s LIMIT 1",
+            $checkoutRequestId
+        ) );
+        if ( $row && $row->status === 'completed' && ! empty( $row->mpesa_receipt ) ) {
+            $receipt = sanitize_text_field( $row->mpesa_receipt );
+            $order->payment_complete( $receipt );
+            $order->update_meta_data( '_mpesa_receipt', $receipt );
+            $order->add_order_note( 'M-Pesa auto-synced from log ✅ Receipt: ' . $receipt );
+            $order->save();
         }
-
-        if ( $order->is_paid() ) {
-            wp_send_json_success( [
-                'status'   => 'paid',
-                'redirect' => wc_get_endpoint_url( 'view-order', $order->get_id(), wc_get_page_permalink( 'myaccount' ) ),
-                'receipt'  => $order->get_meta( '_mpesa_receipt' ),
-            ] );
-            return; // explicit return after wp_send_json
-        }
-
-        wp_send_json_success( [ 'status' => 'pending' ] );
     }
 
     public function format_phone( $phone ) {
@@ -581,8 +566,10 @@ class WC_Mpesa_Gateway extends WC_Payment_Gateway {
     public function thankyou_fallback( $order_id ) {
         $order = wc_get_order( $order_id );
         if ( ! $order ) {
+            return;
         }
         if ( $order->get_payment_method() !== $this->id ) {
+            return;
         }
         $this->thankyou_page( $order_id );
     }
@@ -621,6 +608,7 @@ class WC_Mpesa_Gateway extends WC_Payment_Gateway {
     public function add_order_again_button( $order_id ) {
         $order = wc_get_order( $order_id );
         if ( ! $order || $order->get_payment_method() !== $this->id ) {
+            return;
         }
         $shop_url = get_permalink( wc_get_page_id( 'shop' ) );
         echo '<div style="margin-top:16px;text-align:center;">';
@@ -632,6 +620,7 @@ class WC_Mpesa_Gateway extends WC_Payment_Gateway {
         // Load on checkout form and order-received page
         // Use both checks for maximum theme compatibility
         if ( ! is_checkout() && ! is_wc_endpoint_url( 'order-received' ) ) {
+            return;
         }
 
         wp_enqueue_script(

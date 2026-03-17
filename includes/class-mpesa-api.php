@@ -35,17 +35,21 @@ class WcMpesaApi {
     }
 
     private function makeRequest( $method, $url, $headers, $body = null ) {
-        $args = [
-            'headers'   => $headers,
-            'timeout'   => 30,
-            'sslverify' => false,
-        ];
+        $args = [ 'headers' => $headers, 'timeout' => 30, 'sslverify' => false ];
         if ( $body !== null ) {
             $args['body'] = $body;
         }
-        return $method === 'GET'
-            ? wp_remote_get( $url, $args )
-            : wp_remote_post( $url, $args );
+        return $method === 'GET' ? wp_remote_get( $url, $args ) : wp_remote_post( $url, $args );
+    }
+
+    /**
+     * Parse the raw HTTP response and return the decoded body or WP_Error.
+     */
+    private function parseResponse( $response ) {
+        if ( is_wp_error( $response ) ) {
+            return $response;
+        }
+        return json_decode( wp_remote_retrieve_body( $response ), true );
     }
 
     /**
@@ -58,31 +62,30 @@ class WcMpesaApi {
         if ( $cached ) {
             return $cached;
         }
+        return $this->fetchNewAccessToken();
+    }
 
+    private function fetchNewAccessToken() {
         $credentials = base64_encode( $this->consumerKey . ':' . $this->consumerSecret );
         $response    = $this->makeRequest( 'GET',
             $this->baseUrl() . '/oauth/v1/generate?grant_type=client_credentials',
             [ 'Authorization' => 'Basic ' . $credentials ]
         );
-
-        if ( is_wp_error( $response ) ) {
-            return new WP_Error( 'mpesa_token_error',
-                'M-Pesa connection failed: ' . $response->get_error_message()
-            );
+        $body = $this->parseResponse( $response );
+        if ( is_wp_error( $body ) ) {
+            return new WP_Error( 'mpesa_token_error', 'M-Pesa connection failed: ' . $body->get_error_message() );
         }
+        return $this->extractAndCacheToken( $body, $response );
+    }
 
+    private function extractAndCacheToken( $body, $response ) {
+        if ( ! empty( $body['access_token'] ) ) {
+            set_transient( 'wcmpesa_access_token', $body['access_token'], 55 * MINUTE_IN_SECONDS );
+            return $body['access_token'];
+        }
         $httpCode = wp_remote_retrieve_response_code( $response );
-        $body     = json_decode( wp_remote_retrieve_body( $response ), true );
-
-        if ( empty( $body['access_token'] ) ) {
-            $detail = $body['error_description'] ?? $body['errorMessage'] ?? wp_remote_retrieve_body( $response );
-            return new WP_Error( 'mpesa_token_error',
-                "M-Pesa token error (HTTP $httpCode): $detail"
-            );
-        }
-
-        set_transient( 'wcmpesa_access_token', $body['access_token'], 55 * MINUTE_IN_SECONDS );
-        return $body['access_token'];
+        $detail   = $body['error_description'] ?? $body['errorMessage'] ?? wp_remote_retrieve_body( $response );
+        return new WP_Error( 'mpesa_token_error', "M-Pesa token error (HTTP $httpCode): $detail" );
     }
 
     /**
@@ -99,7 +102,10 @@ class WcMpesaApi {
         if ( is_wp_error( $token ) ) {
             return $token;
         }
+        return $this->sendStkPush( $token, $phone, $amount, $orderId, $callbackUrl );
+    }
 
+    private function sendStkPush( $token, $phone, $amount, $orderId, $callbackUrl ) {
         $timestamp = date( 'YmdHis' );
         $payload   = [
             'BusinessShortCode' => $this->shortcode,
@@ -114,22 +120,22 @@ class WcMpesaApi {
             'AccountReference'  => 'Order-' . $orderId,
             'TransactionDesc'   => 'Payment for Order ' . $orderId,
         ];
-
-        $response = $this->makeRequest( 'POST',
+        $body = $this->parseResponse( $this->makeRequest( 'POST',
             $this->baseUrl() . '/mpesa/stkpush/v1/processrequest',
             [ 'Authorization' => 'Bearer ' . $token, 'Content-Type' => 'application/json' ],
             json_encode( $payload )
-        );
+        ) );
+        return $this->parseStkPushResponse( $body );
+    }
 
-        if ( is_wp_error( $response ) ) {
-            return $response;
-        }
-
-        $body = json_decode( wp_remote_retrieve_body( $response ), true );
-        if ( isset( $body['ResponseCode'] ) && $body['ResponseCode'] === '0' ) {
+    private function parseStkPushResponse( $body ) {
+        if ( is_wp_error( $body ) ) {
             return $body;
         }
-
+        $success = isset( $body['ResponseCode'] ) && $body['ResponseCode'] === '0';
+        if ( $success ) {
+            return $body;
+        }
         $errorMsg = $body['errorMessage'] ?? $body['ResponseDescription'] ?? 'Unknown M-Pesa error.';
         return new WP_Error( 'mpesa_stk_error', $errorMsg, $body );
     }
@@ -145,7 +151,10 @@ class WcMpesaApi {
         if ( is_wp_error( $token ) ) {
             return $token;
         }
+        return $this->sendStkQuery( $token, $checkoutRequestId );
+    }
 
+    private function sendStkQuery( $token, $checkoutRequestId ) {
         $timestamp = date( 'YmdHis' );
         $payload   = [
             'BusinessShortCode' => $this->shortcode,
@@ -153,20 +162,13 @@ class WcMpesaApi {
             'Timestamp'         => $timestamp,
             'CheckoutRequestID' => $checkoutRequestId,
         ];
-
-        $response = $this->makeRequest( 'POST',
+        return $this->parseResponse( $this->makeRequest( 'POST',
             $this->baseUrl() . '/mpesa/stkpushquery/v1/query',
             [ 'Authorization' => 'Bearer ' . $token, 'Content-Type' => 'application/json' ],
             json_encode( $payload )
-        );
-
-        if ( is_wp_error( $response ) ) {
-            return $response;
-        }
-
-        return json_decode( wp_remote_retrieve_body( $response ), true );
+        ) );
     }
 }
 
-// Backward-compatible alias — existing code that references WC_Mpesa_API still works
+// Backward-compatible alias
 class_alias( 'WcMpesaApi', 'WC_Mpesa_API' );

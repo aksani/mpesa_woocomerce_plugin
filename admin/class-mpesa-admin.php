@@ -62,13 +62,13 @@ class WcMpesaAdmin {
     }
 
     private function getSearchTerm() {
-        if ( ! isset( $_GET['s'] ) ) {
-            return '';
-        }
-        if ( ! isset( $_GET['_wpnonce'] ) ) {
-            return '';
-        }
-        if ( ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_GET['_wpnonce'] ) ), 'wcmpesa_search' ) ) {
+        $hasSearch = isset( $_GET['s'] );
+        $hasNonce  = isset( $_GET['_wpnonce'] );
+        $validNonce = $hasNonce && wp_verify_nonce(
+            sanitize_text_field( wp_unslash( $_GET['_wpnonce'] ) ),
+            'wcmpesa_search'
+        );
+        if ( ! $hasSearch || ! $validNonce ) {
             return '';
         }
         return sanitize_text_field( wp_unslash( $_GET['s'] ) );
@@ -189,8 +189,7 @@ class WcMpesaAdmin {
     }
 
     public static function init() {
-        $instance = new self();
-        return $instance;
+        return new self();
     }
 }
 
