@@ -395,6 +395,7 @@ class WC_Mpesa_Gateway extends WC_Payment_Gateway {
         $order->save();
 
         wp_send_json_success( [ 'status' => 'sent', 'message' => 'New prompt sent! Check your phone.' ] );
+        return;
     }
 
     /**

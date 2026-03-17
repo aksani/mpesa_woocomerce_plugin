@@ -51,7 +51,7 @@ jQuery( function( $ ) {
     if ( $box.length === 0 ) return;
 
     const orderId      = $box.data( 'order' );
-    const wcmpesaObj   = typeof wcmpesa !== 'undefined' ? wcmpesa : {};
+    const wcmpesaObj   = typeof wcmpesa === 'undefined' ? {} : wcmpesa;
     const ajaxUrl      = $box.data( 'ajaxurl' ) || wcmpesaObj.ajax_url || ( globalThis.location.origin + '/wp-admin/admin-ajax.php' );
     let nonce          = $box.data( 'nonce' ) || wcmpesaObj.nonce || '';
 

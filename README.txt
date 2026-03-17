@@ -1,5 +1,5 @@
 === WooCommerce M-Pesa Custom ===
-Version: 2.3.3
+Version: 2.3.4
 Requires: WordPress 5.8+, WooCommerce 6.0+, PHP 7.4+
 
 == INSTALLATION ==
