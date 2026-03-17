@@ -187,6 +187,11 @@ class WcMpesaAdmin {
         }
         wp_enqueue_style( 'wcmpesa-admin', WCMPESA_PLUGIN_URL . 'assets/css/admin.css', [], WCMPESA_VERSION );
     }
+
+    public static function init() {
+        $instance = new self();
+        return $instance;
+    }
 }
 
-new WcMpesaAdmin();
+WcMpesaAdmin::init();
