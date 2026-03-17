@@ -26,8 +26,13 @@ class WcMpesaPaymentResolver {
             $this->sendPaidResponse( $order, $order->get_meta( '_mpesa_receipt' ) );
             return;
         }
+        $this->resolveByCheckoutId( $order );
+    }
+
+    private function resolveByCheckoutId( WC_Order $order ) {
         $checkoutRequestId = $order->get_meta( '_mpesa_checkout_request_id' );
-        if ( $checkoutRequestId && $this->syncFromLog( $order, $checkoutRequestId ) ) {
+        $syncedFromLog     = $checkoutRequestId && $this->syncFromLog( $order, $checkoutRequestId );
+        if ( $syncedFromLog ) {
             return;
         }
         if ( $checkoutRequestId ) {
@@ -35,7 +40,6 @@ class WcMpesaPaymentResolver {
             return;
         }
         wp_send_json_error( [ 'message' => 'Payment not confirmed yet. Please wait a moment or try again.' ] );
-        return;
     }
 
     private function syncFromLog( WC_Order $order, $checkoutRequestId ) {
@@ -102,6 +106,5 @@ class WcMpesaPaymentResolver {
     public function sendPaidResponse( WC_Order $order, $receipt ) {
         $redirect = wc_get_endpoint_url( 'view-order', $order->get_id(), wc_get_page_permalink( 'myaccount' ) );
         wp_send_json_success( [ 'status' => 'paid', 'receipt' => $receipt, 'redirect' => $redirect ] );
-        return;
     }
 }
