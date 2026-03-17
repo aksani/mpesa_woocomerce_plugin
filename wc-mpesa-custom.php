@@ -3,7 +3,7 @@
  * Plugin Name: WooCommerce M-Pesa Custom
  * Plugin URI:  https://aksantechnologies.co.ke
  * Description: Accept M-Pesa STK Push payments in WooCommerce via Safaricom Daraja API.
- * Version:     2.3.2
+ * Version:     2.3.3
  * Author:      Aksan
  * License:     GPL-2.0+
  * Text Domain: wc-mpesa-custom
@@ -13,7 +13,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'WCMPESA_VERSION', '2.3.2' );
+define( 'WCMPESA_VERSION', '2.3.3' );
 define( 'WCMPESA_PLUGIN_DIR',      plugin_dir_path( __FILE__ ) );
 define( 'WCMPESA_PLUGIN_URL',      plugin_dir_url( __FILE__ ) );
 define( 'WCMPESA_LOG_TABLE',       'wcmpesa_transactions' );
@@ -62,6 +62,8 @@ function wcmpesaInitGateway() {
     }
 
     require_once WCMPESA_PLUGIN_DIR . 'includes/class-mpesa-api.php';
+    require_once WCMPESA_PLUGIN_DIR . 'includes/class-mpesa-payment-resolver.php';
+    require_once WCMPESA_PLUGIN_DIR . 'includes/class-mpesa-order-status.php';
     require_once WCMPESA_PLUGIN_DIR . 'includes/class-mpesa-gateway.php';
     require_once WCMPESA_PLUGIN_DIR . 'includes/class-mpesa-callback.php';
     require_once WCMPESA_PLUGIN_DIR . 'admin/class-mpesa-admin.php';
